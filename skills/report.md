@@ -1,13 +1,14 @@
 ---
 name: report
-description: Use when user runs /report to generate a daily standup report. Fetches assigned Jira DEV backlog issues for interactive selection as today's plan, and uses yesterday's git commits for previous day's work.
+description: 전날 git 커밋 내역과 Jira 이슈를 분석해 데일리 스탠드업 보고서를 Notion 데이터베이스에 작성한다.
+model: haiku
 ---
 
-# /report — 일일 업무 보고 자동 생성
+# /report — 일일 업무 보고 자동 생성 → Notion 저장
 
 ## Overview
 
-사용자가 `/report`를 실행하면 전날 git 커밋 내역과 현재 변경사항을 분석해 데일리 스탠드업 보고서를 생성한다.
+사용자가 `/report`를 실행하면 전날 git 커밋 내역과 Jira 이슈를 분석해 데일리 스탠드업 보고서를 작성하고, Notion 데이터베이스에 페이지로 저장한다.
 
 ## 실행 절차
 
@@ -26,74 +27,73 @@ git log --oneline -5
 git branch --show-current
 ```
 
-### 2. Jira 백로그 이슈 조회
+### 2. Jira 이슈 조회
 
-`mcp__atlassian__atlassianUserInfo`로 현재 사용자 계정 ID를 확인한 뒤,
-`mcp__atlassian__searchJiraIssuesUsingJql`로 아래 JQL을 실행한다:
+`mcp__atlassian-rovo__getAccessibleAtlassianResources`로 cloudId를 확인한 뒤,
+`mcp__atlassian-rovo__searchJiraIssuesUsingJql`로 아래 JQL을 실행한다:
 
+**메인 이슈 + 하위작업 조회 (2회 실행):**
+
+1. 메인 이슈 조회:
 ```
-project = DEV AND assignee = currentUser() AND status != Done ORDER BY priority DESC
-```
-
-- cloudId: `gameduo-dev.atlassian.net`
-- 최대 20개까지 조회
-
-### 3. 이슈 목록 출력 & 선택 요청
-
-조회된 이슈를 아래 형식으로 출력하고 사용자에게 번호 입력을 요청한다:
-
-```
-📋 백로그 이슈 (DEV 프로젝트)
-  1. DEV-101 로그인 버그 수정
-  2. DEV-102 이미지 업로드 기능 추가
-  3. DEV-103 성능 최적화
-
-오늘 할 이슈 번호 입력 (예: 1,3):
+project = DTP AND assignee = currentUser() AND status != Done AND updated >= -7d ORDER BY updated DESC
 ```
 
-**예외 처리:**
-- 이슈가 없으면: "백로그 이슈가 없습니다. 오늘 작업 계획을 직접 입력해주세요." 출력 후 사용자 입력 대기
-- MCP 오류 발생 시: Jira 단계를 건너뛰고 기존 방식(git diff 기반)으로 오늘 작업 계획 채움
+2. 메인 이슈의 하위작업 조회 (메인 이슈 키를 기반으로):
+```
+project = DTP AND parent in (DTP-XXX, DTP-YYY, ...) ORDER BY updated DESC
+```
+- 1번에서 조회된 `작업` 타입 이슈의 키를 parent 조건에 넣는다
+- 이렇게 하면 본인에게 할당되지 않은 하위작업도 포함하여 전체 작업 현황을 파악할 수 있다
 
-### 4. 변경사항 분석
+- cloudId: `getAccessibleAtlassianResources`로 조회한 값 사용
+- 각 쿼리 최대 20개까지 조회
 
-- **전일 진행 업무**: 어제 커밋된 내용 → 커밋 메시지를 보고 실제 구현 내용으로 해석
-- **오늘 작업 계획**: 사용자가 선택한 Jira 이슈 (DEV-XXX 키 + 이슈 제목)
+### 3. 변경사항 분석
+
+- **전일 진행 업무**: 어제 커밋 메시지 + diff를 분석, Jira 메인 이슈 및 하위작업과 매핑하여 기능 단위로 해석. 각 메인 티켓 아래 관련 하위작업도 함께 표기
+- **오늘 작업 계획**: Jira에서 Backlog/해야 할 일 상태인 하위작업 + 진행 중 이슈 기반으로 작성
 - 파일명/함수명 그대로 나열하지 말고, 기능 단위로 요약
 
-### 5. 보고서 출력
+### 4. Notion 데이터베이스에 페이지 생성
 
-슬랙 mrkdwn 형식으로 아래 템플릿에 맞춰 작성한다.
-- 굵게: `*텍스트*`
-- 기울임: `_텍스트_`
-- 인라인 코드: `` `코드` ``
-- 링크: `<URL|텍스트>`
-- 들여쓰기는 스페이스 4칸 기준
+`mcp__notion__notion-create-pages` 도구로 아래 데이터베이스에 페이지를 생성한다:
 
+- **데이터베이스 ID**: `3442bb52fd43801bbf91fb873ae809c0`
+- **데이터소스 URL**: `collection://3442bb52-fd43-8053-96ee-000bb3a7fa04`
+- **프로퍼티**:
+  - `이름` (title): `YYYY-MM-DD 데일리 리포트` (예: `2026-04-16 데일리 리포트`)
+  - `날짜` (date): 오늘 날짜 (ISO-8601, 예: `2026-04-16`)
+
+**페이지 본문**은 아래 템플릿의 Notion enhanced markdown으로 작성한다:
+
+```markdown
+## 전일 진행 업무
+
+- **<기능 카테고리>** _(<소요시간 추정>h)_ — [티켓키](Jira URL)
+    - <구현 내용 1>
+    - <구현 내용 2>
+
+## 오늘 작업 계획
+
+- **<기능 카테고리>** — [티켓키](Jira URL)
+    - <작업 항목 1>
+    - <작업 항목 2>
+
+## 블로커
+
+- 없음
+
+## 이번 주 목표
+
+- **<이번 주 브랜치/작업 테마 기반으로 요약>** — [티켓키](Jira URL)
+    - <세부 목표 1>
+    - <세부 목표 2>
 ```
-1. *전일 진행 업무*
-    - *<기능 카테고리>* _(<소요시간 추정>h)_ — <Jira URL|티켓키>
-        - <구현 내용 1>
-        - <구현 내용 2>
 
-2. *오늘 작업 계획*
-    - *<기능 카테고리>* — <Jira URL|티켓키>
-        - <작업 항목 1>
-        - <작업 항목 2>
+### 5. CLI 출력
 
-3. *블로커*
-    - 없음
-
-4. *이번 주 목표*
-    - *<이번 주 브랜치/작업 테마 기반으로 요약>* — <Jira URL|티켓키>
-        - <세부 목표 1>
-        - <세부 목표 2>
-```
-
-**Jira 티켓 연동 규칙:**
-- 전일 진행 업무: 어제 업데이트된 Jira 이슈(`updated >= "어제날짜"`)를 조회해 git 커밋 내용과 매핑
-- 오늘 작업 계획: 사용자가 선택한 Jira 이슈 URL을 링크로 연결
-- 이슈가 여러 개일 경우 카테고리별로 묶고 가장 관련성 높은 티켓 1개를 대표로 연결
+Notion 페이지 생성 후, 생성된 페이지 URL을 출력하고 보고서 내용도 CLI에 간략히 표시한다.
 
 ## 작성 규칙
 
@@ -104,9 +104,10 @@ project = DEV AND assignee = currentUser() AND status != Done ORDER BY priority 
 - 세부 항목은 한 줄에 관련 내용을 `+`로 묶어서 최대한 압축
 - 기능 카테고리명은 간결하게 (프로젝트명/모듈명 수준)
 - 소요시간은 변경된 코드량과 커밋 수를 기반으로 합리적으로 추정
-- 코드가 없는 환경(git repo 아님)이면 사용자에게 수동 입력 요청
+- Jira 티켓 연동: 이슈가 여러 개일 경우 카테고리별로 묶고 대표 티켓 1개를 링크로 연결
+- 하위작업(Subtask)도 포함하여 관련 작업을 빠짐없이 반영
 - 블로커와 이번 주 목표는 사용자가 별도로 언급한 경우에만 내용을 채움, 아니면 기본값 유지
-- 출력은 항상 코드블록(```) 안에 감싸서 복사하기 편하게 제공
+- 같은 날짜의 페이지가 이미 존재하면 새로 만들지 말고 기존 페이지를 업데이트
 
 ## 사용 예시
 
